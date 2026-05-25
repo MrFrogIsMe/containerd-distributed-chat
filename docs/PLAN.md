@@ -417,7 +417,7 @@ final/
 ├── README.md
 ├── docs/
 │   ├── final_demo_requirements.md   期末規定
-│   └── AI_architecture_v1.md        本文件
+│   └── PLAN.md                      本文件
 ├── chat-server/
 │   ├── main.py
 │   ├── requirements.txt
