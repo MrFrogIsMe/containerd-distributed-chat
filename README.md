@@ -129,6 +129,7 @@ curl -X POST http://localhost:8080/send \
 | 檔案 | 說明 |
 |------|------|
 | [docs/PLAN.md](docs/PLAN.md) | 系統架構書：問題動機、元件職責、API 規格、分工時程 |
+| [docs/CHECKLIST.md](docs/CHECKLIST.md) | 各階段自驗 Checklist，可自行逐條確認 |
 | [docs/final_demo_requirements.md](docs/final_demo_requirements.md) | 期末 Demo 規定 |
 
 ---

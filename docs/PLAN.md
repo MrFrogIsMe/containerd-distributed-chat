@@ -491,35 +491,39 @@ recovery time   = t4 - t1   （整體對外恢復的時間）
 <!-- SECTION:timeline -->
 ### Phase 1（Day 1-2）：並行開發，靠 mock
 
-| 誰                  | 做什麼                                                  |
-|---------------------|---------------------------------------------------------|
-| Chat Server（2人）  | 實作所有 endpoint + Dockerfile，最高優先                |
-| Gateway（2人）      | 先用 hardcode server list 測 round-robin + heartbeat    |
-| containerd Mgr（2人）| 練習 Go client pull / run nginx，確認環境與 socket 權限 |
-| 報告（2人）         | 畫架構圖、寫 README 骨架、投影片大綱                   |
+| 組別               | 人數 | 做什麼                                                      |
+|--------------------|------|-------------------------------------------------------------|
+| containerd Manager | 3 人 | 練習 Go client：pull / run nginx，確認 socket 權限與環境    |
+| Gateway            | 2 人 | 先用 hardcode server list 測 round-robin，實作 /send /status|
+| Chat Server        | 2 人 | 實作所有 endpoint + Dockerfile，最高優先                    |
+| Heartbeat          | 3 人（與 Gateway 合作） | 設計 ServerRegistry，實作 /register /heartbeat + 掃描 goroutine |
+| Demo / README      | 1 人 | 建目錄結構、寫 README 骨架、準備 demo_status.sh             |
 
 **Day 1 必做：所有人對齊 API 規格（30 分鐘），確認 port / 路由 / JSON 格式。**
 
 ### Phase 2（Day 3-4）：Chat Server 交付，開始整合
 
-| 誰                  | 做什麼                                                  |
-|---------------------|---------------------------------------------------------|
-| Chat Server         | 交付可用版本 + Dockerfile，協助其他人測試               |
-| Gateway             | 接上真實 Chat Server，測 register + heartbeat + /notify |
-| containerd Mgr      | 把 Chat Server image 用 Go client 跑起來，接 event 訂閱 |
-| Demo                | 開始寫 start_all.sh，確認一鍵啟動                       |
+| 組別               | 做什麼                                                       |
+|--------------------|--------------------------------------------------------------|
+| containerd Manager | 把 Chat Server image 用 Go client 跑起來，接全域 event 訂閱  |
+| Gateway            | 接上真實 Chat Server，測 register + heartbeat + /notify      |
+| Chat Server        | 交付可用版本 + Dockerfile，協助其他組測試                    |
+| Heartbeat          | 與 Gateway 整合，驗證 dead 判斷正確、/notify 狀態同步        |
+| Demo / README      | 寫 start_all.sh，確認一鍵啟動，開始寫 README 安裝步驟        |
 
 ### Phase 3（Day 5）：全系統跑通，Demo 整合
 
-- freeze/resume + Gateway 聯動測試
-- kill container → TaskExit event → auto restart → re-register → alive 全流程
-- 跑實驗，記錄 recovery latency 數字
+- freeze/resume + Gateway /notify 聯動全流程測試
+- kill container → TaskExit event → auto restart → re-register → alive
+- 跑三個實驗，記錄 recovery latency 數字
+- Demo 人員完成所有腳本並試跑錄影流程
 
-### Phase 4（Day 6）：錄影 + 報告完成
+### Phase 4（Day 6）：錄影 + 收尾
 
-- 填實驗數據到投影片
-- 錄影（按照 demo 腳本順序）
-- 投影片最終版 → pdf → 上傳 Moodle
+- 填實驗數據到各自的投影片
+- 錄影（按 demo 腳本順序）
+- README 最終版確認安裝步驟可跑
+- 投影片 → pdf → 上傳 Moodle
 <!-- /SECTION:timeline -->
 
 ---
