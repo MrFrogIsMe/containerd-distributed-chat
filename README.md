@@ -5,6 +5,7 @@
 | 檔案 | 說明 |
 |------|------|
 | [docs/final_demo_requirements.md](docs/final_demo_requirements.md) | 期末 Demo 規定（目的、限制、要求、繳交方式） |
+| [docs/AI_architecture_v1.md](docs/AI_architecture_v1.md) | 系統架構書：元件職責、API 規格、交付物、分工時程 |
 
 ---
 
