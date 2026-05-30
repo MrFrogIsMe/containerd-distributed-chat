@@ -9,14 +9,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Node 代表一個 Chat Server 的狀態
 type Node struct {
 	ID     string `json:"server_id"`
 	URL    string `json:"url"`
 	Status string `json:"status"` // "alive", "dead", "frozen"
 }
 
-// 路由表結構（加鎖保護）
+// 接收隊友註冊時的 JSON 格式
+type RegisterReq struct {
+	ID   string `json:"id"`
+	Addr string `json:"addr"` // 例如 "localhost:9001"
+}
+
 type RoutingTable struct {
 	mu    sync.RWMutex
 	Nodes map[string]*Node
@@ -30,12 +34,8 @@ var counter = 0
 func main() {
 	r := gin.Default()
 
-	// 預設兩台測試機（先假裝它們活著）
-	table.Nodes["server-1"] = &Node{ID: "server-1", URL: "http://localhost:9001", Status: "alive"}
-	table.Nodes["server-2"] = &Node{ID: "server-2", URL: "http://localhost:9002", Status: "alive"}
-
 	// ==========================================
-	// 1. 真正的 Client 訊息轉發入口 (Reverse Proxy)
+	// 1. Client 訊息轉發與歷史訊息入口
 	// ==========================================
 	r.POST("/send", func(c *gin.Context) {
 		table.mu.RLock()
@@ -48,32 +48,20 @@ func main() {
 		table.mu.RUnlock()
 
 		if len(aliveNodes) == 0 {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "所有 Chat Server 均無法連線"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "所有 Chat Server 均無法連線"})
 			return
 		}
 
-		// Round-Robin 選擇目標
 		targetNode := aliveNodes[counter%len(aliveNodes)]
 		counter++
 
-		// 【核心升級】：解析目標 Chat Server 的 URL
-		remote, err := url.Parse(targetNode.URL)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "無效的後端 URL"})
-			return
-		}
-
-		// 【核心升級】：建立反向代理，它會把整個 HTTP 請求原封不動轉發過去
+		remote, _ := url.Parse(targetNode.URL)
 		proxy := httputil.NewSingleHostReverseProxy(remote)
-		
-		// 執行轉發
 		proxy.ServeHTTP(c.Writer, c.Request)
 	})
 
-	// ==========================================
-	// 2. 為了架構完整，順便把歷史訊息查詢 /messages 也做轉發
-	// ==========================================
 	r.GET("/messages", func(c *gin.Context) {
+		// 邏輯同上，複製過來即可
 		table.mu.RLock()
 		var aliveNodes []*Node
 		for _, node := range table.Nodes {
@@ -84,7 +72,7 @@ func main() {
 		table.mu.RUnlock()
 
 		if len(aliveNodes) == 0 {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "所有 Chat Server 均無法連線"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "所有 Chat Server 均無法連線"})
 			return
 		}
 
@@ -97,7 +85,50 @@ func main() {
 	})
 
 	// ==========================================
-	// 3. 作法 A：Heartbeat 狀態更新端點
+	// 2. 【新增】配合 Chat Server 負責人的主動註冊端點
+	// ==========================================
+	r.POST("/register", func(c *gin.Context) {
+		var req RegisterReq
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "無效的註冊格式"})
+			return
+		}
+
+		table.mu.Lock()
+		// 把隊友傳來的 "localhost:9001" 轉成 "http://localhost:9001"
+		table.Nodes[req.ID] = &Node{
+			ID:     req.ID,
+			URL:    "http://" + req.Addr,
+			Status: "alive", // 註冊進來預設是活著
+		}
+		table.mu.Unlock()
+
+		c.JSON(http.StatusOK, gin.H{"ok": true, "message": "Chat Server 註冊成功"})
+	})
+
+	// ==========================================
+	// 3. 【新增】配合 Chat Server 負責人的 Heartbeat 端點
+	// ==========================================
+	r.POST("/heartbeat", func(c *gin.Context) {
+		var req map[string]string // 隊友只傳 {"id": "#1"}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false})
+			return
+		}
+
+		serverID := req["id"]
+		println(serverID)
+		table.mu.Lock()
+		if node, exists := table.Nodes[serverID]; exists {
+			node.Status = "alive" // 收到心跳，確保他是 alive
+		}
+		table.mu.Unlock()
+
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// ==========================================
+	// 4. 原本留給 containerd 密你的端點（作法 A 依然保留！）
 	// ==========================================
 	r.POST("/api/nodes/status", func(c *gin.Context) {
 		var req Node
@@ -110,7 +141,7 @@ func main() {
 		table.Nodes[req.ID] = &req
 		table.mu.Unlock()
 
-		c.JSON(http.StatusOK, gin.H{"message": "狀態更新成功", "current_table": table.Nodes})
+		c.JSON(http.StatusOK, gin.H{"message": "containerd 狀態更新成功"})
 	})
 
 	r.Run(":8080")
