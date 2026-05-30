@@ -94,17 +94,60 @@ systemctl enable --now containerd
 
 ## 快速啟動
 
+### Run Gateway
+
+Gateway 預設使用 `8080` port：
+
 ```bash
-# 1. 啟動所有元件
-./scripts/start_all.sh
+cd gateway
+go run main.go
+```
 
-# 2. 查節點狀態
-curl http://localhost:8080/status
 
-# 3. 送訊息（會 round-robin 分流）
+### Run Chat Server
+
+Chat Server 使用 `PORT` 指定自己的服務 port，使用 `SERVER_ID` 指定節點編號。
+請先啟動 Gateway，再開不同 terminal 啟動多個 Chat Server：
+
+```bash
+cd chat-server
+pip install -r requirements.txt
+```
+
+```bash
+export SERVER_ID="1"
+export PORT=9001
+export GATEWAY_URL=http://localhost:8080
+python3 main.py
+```
+
+```bash
+export SERVER_ID="2"
+export PORT=9002
+export GATEWAY_URL=http://localhost:8080
+python3 main.py
+```
+
+```bash
+export SERVER_ID="3"
+export PORT=9003
+export GATEWAY_URL=http://localhost:8080
+python3 main.py
+```
+
+### 測試指令
+
+```bash
+# 送訊息（會 round-robin 分流）
 curl -X POST http://localhost:8080/send \
   -H 'Content-Type: application/json' \
   -d '{"user":"alice","message":"hello"}'
+
+# 查訊息
+curl http://localhost:8080/messages
+
+# 直接檢查某一個 Chat Server
+curl http://localhost:9001/health
 ```
 
 ---
@@ -121,18 +164,6 @@ curl -X POST http://localhost:8080/send \
 # Demo 3：kill #2，Gateway 偵測 dead，containerd 自動 restart
 ./scripts/demo_kill.sh
 ```
-
----
-
-## 文件索引
-
-| 檔案 | 說明 |
-|------|------|
-| [docs/PLAN.md](docs/PLAN.md) | 系統架構書：問題動機、元件職責、API 規格、分工時程 |
-| [docs/CHECKLIST.md](docs/CHECKLIST.md) | 各階段自驗 Checklist，可自行逐條確認 |
-| [docs/final_demo_requirements.md](docs/final_demo_requirements.md) | 期末 Demo 規定 |
-
----
 
 ## 目錄結構
 
