@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -22,6 +25,8 @@ const (
 	imageRef         = "docker.io/library/chat-server:latest"
 	namespace        = "default"
 	restartDelay     = 3 * time.Second
+	gatewayURL       = "http://127.0.0.1:8080"
+	managerPort      = ":7000"
 )
 
 type serverConfig struct {
@@ -31,13 +36,16 @@ type serverConfig struct {
 }
 
 var servers = []serverConfig{
-	{"chat-server-1", "1", 9001},
-	{"chat-server-2", "2", 9002},
-	{"chat-server-3", "3", 9003},
+	{"chat-server-1", "#1", 9001},
+	{"chat-server-2", "#2", 9002},
+	{"chat-server-3", "#3", 9003},
 }
 
-var mu sync.Mutex
-var stopping bool
+var (
+	mu       sync.Mutex
+	stopping bool
+	tasks    = map[string]client.Task{}
+)
 
 func main() {
 	c, err := client.New(containerdSocket)
@@ -47,7 +55,6 @@ func main() {
 	defer c.Close()
 
 	ctx := namespaces.WithNamespace(context.Background(), namespace)
-
 	cleanupAll(ctx, c)
 
 	for _, s := range servers {
@@ -55,6 +62,8 @@ func main() {
 			log.Printf("failed to start %s: %v", s.id, err)
 		}
 	}
+
+	go startHTTPServer(ctx, c)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -66,6 +75,88 @@ func main() {
 	mu.Unlock()
 	cleanupAll(ctx, c)
 }
+
+// ── HTTP server ────────────────────────────────────────────────────────────────
+
+func startHTTPServer(ctx context.Context, c *client.Client) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/freeze", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("id")
+		if err := freezeServer(ctx, id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": id, "status": "frozen"})
+	})
+
+	mux.HandleFunc("/resume", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("id")
+		if err := resumeServer(ctx, id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": id, "status": "alive"})
+	})
+
+	log.Printf("containerd manager listening on %s", managerPort)
+	if err := http.ListenAndServe(managerPort, mux); err != nil {
+		log.Fatalf("http server error: %v", err)
+	}
+}
+
+// ── Freeze / Resume ────────────────────────────────────────────────────────────
+
+func freezeServer(ctx context.Context, id string) error {
+	mu.Lock()
+	task, ok := tasks[id]
+	mu.Unlock()
+	if !ok {
+		return fmt.Errorf("task %q not found", id)
+	}
+
+	if err := task.Pause(ctx); err != nil {
+		return fmt.Errorf("pause failed: %w", err)
+	}
+	log.Printf("[FREEZE] %s paused", id)
+	notifyGateway(serverIDForContainerID(id), fmt.Sprintf("http://127.0.0.1:%d", portForContainerID(id)), "frozen")
+	return nil
+}
+
+func resumeServer(ctx context.Context, id string) error {
+	mu.Lock()
+	task, ok := tasks[id]
+	mu.Unlock()
+	if !ok {
+		return fmt.Errorf("task %q not found", id)
+	}
+
+	if err := task.Resume(ctx); err != nil {
+		return fmt.Errorf("resume failed: %w", err)
+	}
+	log.Printf("[RESUME] %s resumed", id)
+	notifyGateway(serverIDForContainerID(id), fmt.Sprintf("http://127.0.0.1:%d", portForContainerID(id)), "alive")
+	return nil
+}
+
+// ── Gateway notification ───────────────────────────────────────────────────────
+
+func notifyGateway(serverID, url, status string) {
+	body, _ := json.Marshal(map[string]string{
+		"server_id": serverID,
+		"url":       url,
+		"status":    status,
+	})
+	resp, err := http.Post(gatewayURL+"/api/nodes/status", "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[NOTIFY] gateway error: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	log.Printf("[NOTIFY] gateway updated %s -> %s", serverID, status)
+}
+
+// ── Container lifecycle ────────────────────────────────────────────────────────
 
 func startChatServer(ctx context.Context, c *client.Client, s serverConfig, watch bool) error {
 	image, err := c.GetImage(ctx, imageRef)
@@ -110,6 +201,10 @@ func startChatServer(ctx context.Context, c *client.Client, s serverConfig, watc
 		return fmt.Errorf("failed to start task: %w", err)
 	}
 
+	mu.Lock()
+	tasks[s.id] = task
+	mu.Unlock()
+
 	log.Printf("started %s (SERVER_ID=%s, port=%d, pid=%d)", s.id, s.serverID, s.port, task.Pid())
 
 	if watch {
@@ -118,6 +213,7 @@ func startChatServer(ctx context.Context, c *client.Client, s serverConfig, watc
 			code, _, _ := status.Result()
 
 			mu.Lock()
+			delete(tasks, s.id)
 			isStopping := stopping
 			mu.Unlock()
 
@@ -157,4 +253,24 @@ func getTask(ctx context.Context, c *client.Client, id string) (client.Task, err
 		return nil, err
 	}
 	return ctr.Task(ctx, nil)
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+func serverIDForContainerID(containerID string) string {
+	for _, s := range servers {
+		if s.id == containerID {
+			return s.serverID
+		}
+	}
+	return containerID
+}
+
+func portForContainerID(containerID string) int {
+	for _, s := range servers {
+		if s.id == containerID {
+			return s.port
+		}
+	}
+	return 0
 }
