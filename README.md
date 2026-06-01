@@ -90,6 +90,11 @@ containerd daemon (/run/containerd/containerd.sock)
 sudo apt install containerd
 sudo systemctl enable --now containerd
 ```
+安裝 Go：
+
+```bash
+sudo snap install go --classic
+```
 
 ---
 
