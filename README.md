@@ -81,58 +81,51 @@ containerd daemon (/run/containerd/containerd.sock)
 - containerd v2.x（需 root 或 containerd socket 存取權限）
 - runc（containerd 的預設 OCI runtime）
 - Go 1.21+（Gateway、containerd Manager）
-- Python 3.11+（Chat Server）
+- Python 3.11+（Chat Server，本機開發用）
+- Docker（用來 build chat-server image，再匯入 containerd）
 
 安裝 containerd（Ubuntu/Debian）：
 
 ```bash
-apt install containerd
-systemctl enable --now containerd
+sudo apt install containerd
+sudo systemctl enable --now containerd
 ```
 
 ---
 
 ## 快速啟動
 
-### Run Gateway
+### 1. Build chat-server image
 
-Gateway 預設使用 `8080` port：
+```bash
+cd chat-server
+docker build -t chat-server:latest .
+docker save chat-server:latest | sudo ctr images import -
+```
+
+### 2. Run Gateway
 
 ```bash
 cd gateway
 go run main.go
 ```
 
+### 3. Run containerd Manager
 
-### Run Chat Server
-
-Chat Server 使用 `PORT` 指定自己的服務 port，使用 `SERVER_ID` 指定節點編號。
-請先啟動 Gateway，再開不同 terminal 啟動多個 Chat Server：
+containerd Manager 會自動啟動三個 chat-server container：
 
 ```bash
-cd chat-server
-pip install -r requirements.txt
+cd containerd-manager
+sudo go run main.go
 ```
 
-```bash
-export SERVER_ID="1"
-export PORT=9001
-export GATEWAY_URL=http://localhost:8080
-python3 main.py
-```
+成功後會看到：
 
-```bash
-export SERVER_ID="2"
-export PORT=9002
-export GATEWAY_URL=http://localhost:8080
-python3 main.py
 ```
-
-```bash
-export SERVER_ID="3"
-export PORT=9003
-export GATEWAY_URL=http://localhost:8080
-python3 main.py
+started chat-server-1 (SERVER_ID=#1, port=9001, pid=...)
+started chat-server-2 (SERVER_ID=#2, port=9002, pid=...)
+started chat-server-3 (SERVER_ID=#3, port=9003, pid=...)
+containerd manager listening on :7000
 ```
 
 ### 測試指令
@@ -154,23 +147,52 @@ curl http://localhost:9001/health
 
 ## Demo 情境
 
+### Demo 1：正常聊天，round-robin 分流
+
 ```bash
-# Demo 1：正常運作，訊息輪流由 #1/#2/#3 回應
-./scripts/demo_normal.sh
-
-# Demo 2：freeze #1，流量自動繞開，resume 後恢復
-./scripts/demo_freeze.sh
-
-# Demo 3：kill #2，Gateway 偵測 dead，containerd 自動 restart
-./scripts/demo_kill.sh
+for i in $(seq 1 6); do
+  curl -s -X POST http://localhost:8080/send \
+    -H 'Content-Type: application/json' \
+    -d "{\"user\":\"alice\",\"message\":\"msg $i\"}"
+  echo
+done
 ```
+
+訊息會輪流由 #1 / #2 / #3 回應。
+
+### Demo 2：Freeze 節點，流量自動繞開
+
+```bash
+# freeze #2
+curl -X POST "http://localhost:7000/freeze?id=chat-server-2"
+
+# 送訊息，只會由 #1 和 #3 回應
+curl -X POST http://localhost:8080/send \
+  -H 'Content-Type: application/json' \
+  -d '{"user":"alice","message":"frozen test"}'
+
+# resume #2
+curl -X POST "http://localhost:7000/resume?id=chat-server-2"
+```
+
+### Demo 3：Kill 節點，自動偵測並 restart
+
+```bash
+# kill chat-server-2 的 container
+sudo ctr tasks kill -s SIGKILL chat-server-2
+
+# 觀察 containerd Manager 的 terminal，3 秒後自動 restart
+# [EXIT] chat-server-2 exited with code 137 — restarting in 3s
+# started chat-server-2 (SERVER_ID=#2, port=9002, pid=...)
+```
+
+---
 
 ## 目錄結構
 
 ```
-final/
+containerd-distributed-chat/
 ├── chat-server/          Python，聊天室服務（含 Dockerfile）
 ├── gateway/              Go，入口 + heartbeat registry
-├── containerd-manager/   Go，容器生命週期管理與 event 訂閱
-└── scripts/              Demo 與測試腳本
+└── containerd-manager/   Go，容器生命週期管理與 event 訂閱
 ```
