@@ -1,24 +1,26 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 type Node struct {
-	ID     string `json:"server_id"`
-	URL    string `json:"url"`
-	Status string `json:"status"` // "alive", "dead", "frozen"
+	ID            string    `json:"server_id"`
+	URL           string    `json:"url"`
+	Status        string    `json:"status"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
 }
 
-// 接收隊友註冊時的 JSON 格式
 type RegisterReq struct {
 	ID   string `json:"id"`
-	Addr string `json:"addr"` // 例如 "localhost:9001"
+	Addr string `json:"addr"`
 }
 
 type RoutingTable struct {
@@ -26,123 +28,156 @@ type RoutingTable struct {
 	Nodes map[string]*Node
 }
 
-var table = RoutingTable{
-	Nodes: make(map[string]*Node),
+var table = RoutingTable{Nodes: make(map[string]*Node)}
+var counter int
+
+const heartbeatTimeout = 10 * time.Second
+const checkInterval = 3 * time.Second
+
+func startWatchdog() {
+	ticker := time.NewTicker(checkInterval)
+	go func() {
+		for range ticker.C {
+			now := time.Now()
+			table.mu.Lock()
+			for id, node := range table.Nodes {
+				if node.Status == "frozen" || node.Status == "dead" {
+					continue
+				}
+				if now.Sub(node.LastHeartbeat) > heartbeatTimeout {
+					log.Printf("[Watchdog] 節點 %s 超過 %.0fs 沒有 heartbeat，標記為 dead", id, heartbeatTimeout.Seconds())
+					node.Status = "dead"
+				}
+			}
+			table.mu.Unlock()
+		}
+	}()
+	log.Printf("[Watchdog] 啟動，每 %.0fs 掃一次，超過 %.0fs 沒心跳標 dead", checkInterval.Seconds(), heartbeatTimeout.Seconds())
 }
-var counter = 0
 
 func main() {
+	startWatchdog()
 	r := gin.Default()
 
-	// ==========================================
-	// 1. Client 訊息轉發與歷史訊息入口
-	// ==========================================
 	r.POST("/send", func(c *gin.Context) {
-		table.mu.RLock()
-		var aliveNodes []*Node
-		for _, node := range table.Nodes {
-			if node.Status == "alive" {
-				aliveNodes = append(aliveNodes, node)
-			}
-		}
-		table.mu.RUnlock()
-
-		if len(aliveNodes) == 0 {
+		node := pickAliveNode()
+		if node == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "所有 Chat Server 均無法連線"})
 			return
 		}
-
-		targetNode := aliveNodes[counter%len(aliveNodes)]
-		counter++
-
-		remote, _ := url.Parse(targetNode.URL)
-		proxy := httputil.NewSingleHostReverseProxy(remote)
-		proxy.ServeHTTP(c.Writer, c.Request)
+		proxyTo(node.URL, c)
 	})
 
 	r.GET("/messages", func(c *gin.Context) {
-		// 邏輯同上，複製過來即可
-		table.mu.RLock()
-		var aliveNodes []*Node
-		for _, node := range table.Nodes {
-			if node.Status == "alive" {
-				aliveNodes = append(aliveNodes, node)
-			}
-		}
-		table.mu.RUnlock()
-
-		if len(aliveNodes) == 0 {
+		node := pickAliveNode()
+		if node == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "所有 Chat Server 均無法連線"})
 			return
 		}
-
-		targetNode := aliveNodes[counter%len(aliveNodes)]
-		counter++
-
-		remote, _ := url.Parse(targetNode.URL)
-		proxy := httputil.NewSingleHostReverseProxy(remote)
-		proxy.ServeHTTP(c.Writer, c.Request)
+		proxyTo(node.URL, c)
 	})
 
-	// ==========================================
-	// 2. 【新增】配合 Chat Server 負責人的主動註冊端點
-	// ==========================================
 	r.POST("/register", func(c *gin.Context) {
 		var req RegisterReq
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "無效的註冊格式"})
+		if err := c.ShouldBindJSON(&req); err != nil || req.ID == "" || req.Addr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "需要 id 和 addr"})
 			return
 		}
-
 		table.mu.Lock()
-		// 把隊友傳來的 "localhost:9001" 轉成 "http://localhost:9001"
 		table.Nodes[req.ID] = &Node{
-			ID:     req.ID,
-			URL:    "http://" + req.Addr,
-			Status: "alive", // 註冊進來預設是活著
+			ID:            req.ID,
+			URL:           "http://" + req.Addr,
+			Status:        "alive",
+			LastHeartbeat: time.Now(),
 		}
 		table.mu.Unlock()
-
-		c.JSON(http.StatusOK, gin.H{"ok": true, "message": "Chat Server 註冊成功"})
+		log.Printf("[Gateway] 節點 %s 已註冊 (%s)", req.ID, req.Addr)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "message": "註冊成功"})
 	})
 
-	// ==========================================
-	// 3. 【新增】配合 Chat Server 負責人的 Heartbeat 端點
-	// ==========================================
 	r.POST("/heartbeat", func(c *gin.Context) {
-		var req map[string]string // 隊友只傳 {"id": "#1"}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"ok": false})
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.ID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "需要 id"})
 			return
 		}
-
-		serverID := req["id"]
-		println(serverID)
 		table.mu.Lock()
-		if node, exists := table.Nodes[serverID]; exists {
-			node.Status = "alive" // 收到心跳，確保他是 alive
+		node, exists := table.Nodes[req.ID]
+		if exists {
+			node.LastHeartbeat = time.Now()
+			if node.Status == "dead" {
+				node.Status = "alive"
+				log.Printf("[Gateway] 節點 %s 心跳恢復，標記為 alive", req.ID)
+			}
 		}
 		table.mu.Unlock()
-
+		if !exists {
+			c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "節點未註冊"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
-	// ==========================================
-	// 4. 原本留給 containerd 密你的端點（作法 A 依然保留！）
-	// ==========================================
 	r.POST("/api/nodes/status", func(c *gin.Context) {
 		var req Node
-		if err := c.ShouldBindJSON(&req); err != nil {
+		if err := c.ShouldBindJSON(&req); err != nil || req.ID == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "無效的格式"})
 			return
 		}
-
 		table.mu.Lock()
-		table.Nodes[req.ID] = &req
+		if existing, ok := table.Nodes[req.ID]; ok {
+			existing.Status = req.Status
+			if req.URL != "" {
+				existing.URL = req.URL
+			}
+		} else {
+			req.LastHeartbeat = time.Now()
+			table.Nodes[req.ID] = &req
+		}
 		table.mu.Unlock()
+		log.Printf("[Gateway] containerd Manager 更新：%s → %s", req.ID, req.Status)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
 
-		c.JSON(http.StatusOK, gin.H{"message": "containerd 狀態更新成功"})
+	r.GET("/status", func(c *gin.Context) {
+		table.mu.RLock()
+		defer table.mu.RUnlock()
+		result := make(map[string]gin.H, len(table.Nodes))
+		for id, node := range table.Nodes {
+			result[id] = gin.H{
+				"status":         node.Status,
+				"url":            node.URL,
+				"last_heartbeat": node.LastHeartbeat.Format(time.RFC3339),
+				"seconds_ago":    int(time.Since(node.LastHeartbeat).Seconds()),
+			}
+		}
+		c.JSON(http.StatusOK, result)
 	})
 
 	r.Run(":8080")
+}
+
+func pickAliveNode() *Node {
+	table.mu.RLock()
+	defer table.mu.RUnlock()
+	var alive []*Node
+	for _, node := range table.Nodes {
+		if node.Status == "alive" {
+			alive = append(alive, node)
+		}
+	}
+	if len(alive) == 0 {
+		return nil
+	}
+	node := alive[counter%len(alive)]
+	counter++
+	return node
+}
+
+func proxyTo(targetURL string, c *gin.Context) {
+	remote, _ := url.Parse(targetURL)
+	proxy := httputil.NewSingleHostReverseProxy(remote)
+	proxy.ServeHTTP(c.Writer, c.Request)
 }
