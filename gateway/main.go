@@ -61,21 +61,21 @@ func main() {
 	r := gin.Default()
 
 	r.POST("/send", func(c *gin.Context) {
-		node := pickAliveNode()
-		if node == nil {
+		nodeURL := pickAliveNodeURL()
+		if nodeURL == "" {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "所有 Chat Server 均無法連線"})
 			return
 		}
-		proxyTo(node.URL, c)
+		proxyTo(nodeURL, c)
 	})
 
 	r.GET("/messages", func(c *gin.Context) {
-		node := pickAliveNode()
-		if node == nil {
+		nodeURL := pickAliveNodeURL()
+		if nodeURL == "" {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "所有 Chat Server 均無法連線"})
 			return
 		}
-		proxyTo(node.URL, c)
+		proxyTo(nodeURL, c)
 	})
 
 	r.POST("/register", func(c *gin.Context) {
@@ -159,17 +159,20 @@ func main() {
 	r.Run(":8080")
 }
 
-func pickAliveNode() *Node {
+// pickAliveNodeURL returns the URL of a live node (copied under read lock).
+// Returning a string value instead of *Node avoids a data race where callers
+// would read node.URL after the lock is released.
+func pickAliveNodeURL() string {
 	table.mu.RLock()
 	defer table.mu.RUnlock()
-	var alive []*Node
+	var alive []string
 	for _, node := range table.Nodes {
 		if node.Status == "alive" {
-			alive = append(alive, node)
+			alive = append(alive, node.URL)
 		}
 	}
 	if len(alive) == 0 {
-		return nil
+		return ""
 	}
 	n := counter.Add(1) - 1
 	return alive[n%int64(len(alive))]
