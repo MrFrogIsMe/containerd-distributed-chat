@@ -6,6 +6,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -29,7 +30,7 @@ type RoutingTable struct {
 }
 
 var table = RoutingTable{Nodes: make(map[string]*Node)}
-var counter int
+var counter atomic.Int64
 
 const heartbeatTimeout = 10 * time.Second
 const checkInterval = 3 * time.Second
@@ -105,18 +106,17 @@ func main() {
 		}
 		table.mu.Lock()
 		node, exists := table.Nodes[req.ID]
-		if exists {
-			node.LastHeartbeat = time.Now()
-			if node.Status == "dead" {
-				node.Status = "alive"
-				log.Printf("[Gateway] 節點 %s 心跳恢復，標記為 alive", req.ID)
-			}
-		}
-		table.mu.Unlock()
 		if !exists {
+			table.mu.Unlock()
 			c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "節點未註冊"})
 			return
 		}
+		node.LastHeartbeat = time.Now()
+		if node.Status == "dead" {
+			node.Status = "alive"
+			log.Printf("[Gateway] 節點 %s 心跳恢復，標記為 alive", req.ID)
+		}
+		table.mu.Unlock()
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
@@ -171,9 +171,8 @@ func pickAliveNode() *Node {
 	if len(alive) == 0 {
 		return nil
 	}
-	node := alive[counter%len(alive)]
-	counter++
-	return node
+	n := counter.Add(1) - 1
+	return alive[n%int64(len(alive))]
 }
 
 func proxyTo(targetURL string, c *gin.Context) {
