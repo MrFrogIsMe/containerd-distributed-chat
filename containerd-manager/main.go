@@ -119,7 +119,7 @@ func freezeServer(ctx context.Context, id string) error {
 		return fmt.Errorf("pause failed: %w", err)
 	}
 	log.Printf("[FREEZE] %s paused", id)
-	notifyGateway(serverIDForContainerID(id), fmt.Sprintf("http://127.0.0.1:%d", portForContainerID(id)), "frozen")
+	notifyGateway(serverIDForContainerID(id), fmt.Sprintf("http://localhost:%d", portForContainerID(id)), "frozen")
 	return nil
 }
 
@@ -135,7 +135,7 @@ func resumeServer(ctx context.Context, id string) error {
 		return fmt.Errorf("resume failed: %w", err)
 	}
 	log.Printf("[RESUME] %s resumed", id)
-	notifyGateway(serverIDForContainerID(id), fmt.Sprintf("http://127.0.0.1:%d", portForContainerID(id)), "alive")
+	notifyGateway(serverIDForContainerID(id), fmt.Sprintf("http://localhost:%d", portForContainerID(id)), "alive")
 	return nil
 }
 
