@@ -37,7 +37,7 @@ Gateway :8080          ← 入口、round-robin 分流
   └── Chat Server #3 :9003  ┘
 
 containerd Manager :7000
-  │  訂閱 TaskExit event、協調 restart、凍結/恢復、通知 Gateway
+  │  限制容器實體記憶體 (64MB)、監聽 TaskExit event、協調 restart、凍結/恢復、通知 Gateway
   ▼
 containerd daemon (/run/containerd/containerd.sock)
   │
@@ -61,7 +61,7 @@ containerd daemon (/run/containerd/containerd.sock)
 
 | 模式               | 實作位置                  | Demo 方式                               |
 |--------------------|---------------------------|-----------------------------------------|
-| Failure Detection  | Gateway heartbeat registry| kill server → 10s 後自動標 dead         |
+| Failure Detection  | Gateway heartbeat registry| 停止傳送心跳 → 10s 後自動標 dead         |
 | Auto Recovery      | containerd Manager        | container exit event → 自動 restart     |
 | Load Balancing     | Gateway round-robin       | 訊息輪流由不同 server 回應              |
 | Freeze / Resume    | containerd Manager        | task.Pause() / Resume() + Gateway 聯動  |
@@ -108,87 +108,89 @@ docker build -t chat-server:latest .
 docker save chat-server:latest | sudo ctr images import -
 ```
 
-### 2. Run Gateway
+### 2. Run Gateway (視窗 1)
 
 ```bash
 cd gateway
 go run main.go
 ```
 
-### 3. Run containerd Manager
+### 3. Run containerd Manager (視窗 2)
 
-containerd Manager 會自動啟動三個 chat-server container：
+containerd Manager 會自動啟動三個 chat-server container，並套用 64MB 的記憶體限制：
 
 ```bash
 cd containerd-manager
 sudo go run main.go
 ```
 
-成功後會看到：
+### 4. 監控叢集狀態 (視窗 3)
 
-```
-started chat-server-1 (SERVER_ID=#1, port=9001, pid=...)
-started chat-server-2 (SERVER_ID=#2, port=9002, pid=...)
-started chat-server-3 (SERVER_ID=#3, port=9003, pid=...)
-containerd manager listening on :7000
-```
-
-### 測試指令
+專案提供了一套自動化監控與 Demo 腳本：
 
 ```bash
-# 送訊息（會 round-robin 分流）
-curl -X POST http://localhost:8080/send \
-  -H 'Content-Type: application/json' \
-  -d '{"user":"alice","message":"hello"}'
-
-# 查訊息
-curl http://localhost:8080/messages
-
-# 直接檢查某一個 Chat Server
-curl http://localhost:9001/health
+# 每 2 秒刷新一次 Gateway /status，用紅、黃、綠區分節點健康度
+bash scripts/demo_status.sh
 ```
 
 ---
 
-## Demo 情境
+## Demo 情境與腳本
+
+我們將所有測試流程寫成了自動化 Demo 腳本。在**視窗 4** 中，你可以依序執行以下腳本進行演示：
 
 ### Demo 1：正常聊天，round-robin 分流
 
 ```bash
-for i in $(seq 1 6); do
-  curl -s -X POST http://localhost:8080/send \
-    -H 'Content-Type: application/json' \
-    -d "{\"user\":\"alice\",\"message\":\"msg $i\"}"
-  echo
-done
+bash scripts/demo_normal.sh
 ```
-
-訊息會輪流由 #1 / #2 / #3 回應。
+* **預期結果**：腳本會發送 9 條訊息，並顯示 server_id 輪流出現 `#1`、`#2`、`#3`，證明輪詢負載平衡完全正常。
 
 ### Demo 2：Freeze 節點，流量自動繞開
 
 ```bash
-# freeze #2
-curl -X POST "http://localhost:7000/freeze?id=chat-server-2"
-
-# 送訊息，只會由 #1 和 #3 回應
-curl -X POST http://localhost:8080/send \
-  -H 'Content-Type: application/json' \
-  -d '{"user":"alice","message":"frozen test"}'
-
-# resume #2
-curl -X POST "http://localhost:7000/resume?id=chat-server-2"
+bash scripts/demo_freeze.sh
 ```
+* **預期結果**：
+  1. 暫停 `chat-server-2`，狀態在 `/status` 變為 `frozen`。
+  2. 發送 6 條訊息，流量完全繞開，只由 `#1` 與 `#3` 回應。
+  3. 恢復（Resume）`#2`，狀態回到 `alive`。
+  4. 發送 6 條訊息，`#2` 自動重回輪替。
 
-### Demo 3：Kill 節點，自動偵測並 restart
+### Demo 3：Kill 節點，自動偵測並 restart (Auto-Recovery)
 
 ```bash
-# kill chat-server-2 的 container
-sudo ctr tasks kill -s SIGKILL chat-server-2
+bash scripts/demo_kill.sh
+```
+* **預期結果**：直接向 containerd 發送 `SIGKILL` 幹掉 `chat-server-2` 容器。由於 containerd Manager 通過 `exitCh` 連接了 OCI event，Manager 會在 3 秒內清理並重建全新乾淨的容器，並自動重新註冊。
 
-# 觀察 containerd Manager 的 terminal，3 秒後自動 restart
-# [EXIT] chat-server-2 exited with code 137 — restarting in 3s
-# started chat-server-2 (SERVER_ID=#2, port=9002, pid=...)
+### Demo 4：OOM 觸發自動重啟 (OOM Auto-Recovery)
+
+```bash
+bash scripts/demo_oom.sh
+```
+* **預期結果**：
+  1. `chat-server-2` 受限於 64MB 記憶體。
+  2. 腳本在容器內注入約 150MB 的記憶體炸彈。
+  3. Linux Kernel 的 OOM Killer 迅速終止容器（Exit code 137）。
+  4. containerd Manager 偵測到死亡，於 3 秒內自動將其拉回。
+
+---
+
+## 手動操作與除錯指令
+
+如果你不想使用自動化腳本，也可以手動執行以下核心指令進行 Demo：
+
+```bash
+# 查看當前 containerd 執行的 tasks
+sudo ctr tasks list
+
+# 手動凍結/解凍容器
+curl -X POST "http://localhost:7000/freeze?id=chat-server-2"
+curl -X POST "http://localhost:7000/resume?id=chat-server-2"
+
+# 手動觸發 OOM-Kill 炸彈
+sudo ctr tasks exec --exec-id manual-oom chat-server-2 python3 -c "x = 'A' * 150000000"
 ```
 
 ---
@@ -199,5 +201,6 @@ sudo ctr tasks kill -s SIGKILL chat-server-2
 containerd-distributed-chat/
 ├── chat-server/          Python，聊天室服務（含 Dockerfile）
 ├── gateway/              Go，入口 + heartbeat registry
-└── containerd-manager/   Go，容器生命週期管理與 event 訂閱
+├── containerd-manager/   Go，容器生命週期管理與 event 訂閱
+└── scripts/              Shell，自動化監控與一鍵 Demo 腳本
 ```
