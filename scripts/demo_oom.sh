@@ -41,38 +41,41 @@ except:
 }
 
 echo -e "${BLUE}============================================================${NC}"
-echo -e "${BLUE}  Demo: Manual Kill — 手動強制終止 container 並自動重啟${NC}"
+echo -e "${BLUE}  Demo: OOM Kill — container 記憶體超限自動重啟${NC}"
 echo -e "${BLUE}============================================================${NC}"
 echo ""
-echo -e "${YELLOW}原理：直接用 SIGKILL 殺掉 container，模擬 process crash${NC}"
-echo -e "${YELLOW}containerd Manager 的 exitCh goroutine 即時感知，3 秒後重啟${NC}"
+echo -e "${YELLOW}原理：chat-server-2 限制 64MB RAM，故意塞入大量資料觸發 OOM${NC}"
+echo -e "${YELLOW}kernel OOM killer 強制殺掉 container，containerd Manager 自動重啟${NC}"
 echo ""
 
 echo -e "${BLUE}[Step 1] 目前狀態：${NC}"
 show_status
 echo ""
 
-echo -e "${RED}[Step 2] 強制 kill chat-server-2...${NC}"
+echo -e "${RED}[Step 2] 在 chat-server-2 container 內執行記憶體炸彈...${NC}"
+echo -e "  指令：python3 -c \"x = 'A' * 200000000\"  (吃 ~200MB，超過 64MB 限制)"
 KILL_TIME=$(date +%s)
-sudo ctr tasks kill -s SIGKILL chat-server-2
-echo -e "  ${RED}SIGKILL 送出於 $(date '+%H:%M:%S')${NC}"
-echo -e "  containerd Manager 的 exitCh goroutine 已感知，等待 3s 重啟..."
+
+sudo ctr tasks exec --exec-id oom-bomb chat-server-2 python3 -c "x = 'A' * 200000000" &
+OOM_PID=$!
+echo -e "  ${RED}OOM 觸發於 $(date '+%H:%M:%S')${NC}"
 echo ""
 
-echo -e "${YELLOW}[Step 3] 每 1 秒 poll，觀察重啟過程...${NC}"
+echo -e "${YELLOW}[Step 3] 等待 kernel OOM killer 介入，觀察 container 死亡與重啟...${NC}"
 ALIVE_TIME=0
 for i in $(seq 1 20); do
-    sleep 1
+    sleep 2
     NODE2=$(get_node_status "#2")
     ELAPSED=$(( $(date +%s) - KILL_TIME ))
-    if [ "$NODE2" = "alive" ] && [ $ELAPSED -gt 2 ]; then
+    if [ "$NODE2" = "alive" ] && [ $ELAPSED -gt 3 ]; then
         ALIVE_TIME=$(date +%s)
-        echo -e "  +${ELAPSED}s: #2 = ${GREEN}${NODE2}${NC}  <- 重啟完成！"
+        echo -e "  ${ELAPSED}s: #2 = ${GREEN}${NODE2}${NC}  <- 重啟完成！"
         break
     else
-        echo -e "  +${ELAPSED}s: #2 = ${YELLOW}${NODE2}${NC}"
+        echo -e "  ${ELAPSED}s: #2 = ${YELLOW}${NODE2}${NC}"
     fi
 done
+wait $OOM_PID 2>/dev/null
 echo ""
 
 echo -e "${BLUE}[Step 4] 最終狀態：${NC}"
@@ -83,7 +86,7 @@ echo -e "${BLUE}============================================================${NC
 echo -e "${BLUE}  Summary${NC}"
 echo -e "${BLUE}============================================================${NC}"
 if [ $ALIVE_TIME -gt 0 ]; then
-    echo -e "  SIGKILL 到重啟完成：${GREEN}$(( ALIVE_TIME - KILL_TIME ))s${NC}"
+    echo -e "  OOM 觸發到重啟完成：${GREEN}$(( ALIVE_TIME - KILL_TIME ))s${NC}"
 else
     echo -e "  未在時間內觀測到重啟"
 fi
