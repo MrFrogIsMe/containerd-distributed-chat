@@ -170,7 +170,6 @@ func startChatServer(ctx context.Context, c *client.Client, s serverConfig, watc
 		client.WithNewSpec(
 			oci.WithImageConfig(image),
 			oci.WithHostNamespace(specs.NetworkNamespace),
-			oci.WithMemoryLimit(64*1024*1024), // 64MB limit for OOM demo
 			oci.WithEnv([]string{
 				fmt.Sprintf("SERVER_ID=%s", s.serverID),
 				fmt.Sprintf("PORT=%d", s.port),

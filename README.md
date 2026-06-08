@@ -20,7 +20,7 @@ containerd 可以管理 container 的生命週期（start / stop / pause / resum
 但它本身**不偵測服務健康、不跟 Gateway 聯動、不會自動協調恢復**。
 
 我們在 containerd 之上實作一層協調系統，讓服務在 container 故障時
-對 client 透明地自癒——這就是這個專題想解決的問題。
+對 client透明地自癒——這就是這個專題想解決的問題。
 
 ---
 
@@ -37,7 +37,7 @@ Gateway :8080          ← 入口、round-robin 分流
   └── Chat Server #3 :9003  ┘
 
 containerd Manager :7000
-  │  限制容器實體記憶體 (64MB)、監聽 TaskExit event、協調 restart、凍結/恢復、通知 Gateway
+  │  訂閱 TaskExit event、協調 restart、凍結/恢復、通知 Gateway
   ▼
 containerd daemon (/run/containerd/containerd.sock)
   │
@@ -117,7 +117,7 @@ go run main.go
 
 ### 3. Run containerd Manager (視窗 2)
 
-containerd Manager 會自動啟動三個 chat-server container，並套用 64MB 的記憶體限制：
+containerd Manager 會自動啟動三個 chat-server container：
 
 ```bash
 cd containerd-manager
@@ -164,17 +164,6 @@ bash scripts/demo_kill.sh
 ```
 * **預期結果**：直接向 containerd 發送 `SIGKILL` 幹掉 `chat-server-2` 容器。由於 containerd Manager 通過 `exitCh` 連接了 OCI event，Manager 會在 3 秒內清理並重建全新乾淨的容器，並自動重新註冊。
 
-### Demo 4：OOM 觸發自動重啟 (OOM Auto-Recovery)
-
-```bash
-bash scripts/demo_oom.sh
-```
-* **預期結果**：
-  1. `chat-server-2` 受限於 64MB 記憶體。
-  2. 腳本在容器內注入約 150MB 的記憶體炸彈。
-  3. Linux Kernel 的 OOM Killer 迅速終止容器（Exit code 137）。
-  4. containerd Manager 偵測到死亡，於 3 秒內自動將其拉回。
-
 ---
 
 ## 手動操作與除錯指令
@@ -188,9 +177,6 @@ sudo ctr tasks list
 # 手動凍結/解凍容器
 curl -X POST "http://localhost:7000/freeze?id=chat-server-2"
 curl -X POST "http://localhost:7000/resume?id=chat-server-2"
-
-# 手動觸發 OOM-Kill 炸彈
-sudo ctr tasks exec --exec-id manual-oom chat-server-2 python3 -c "x = 'A' * 150000000"
 ```
 
 ---
